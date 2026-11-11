@@ -1,0 +1,6 @@
+apiVersion: 1
+providers:
+  - name: cloudops
+    folder: CloudOps AI
+    type: file
+    options: { path: /var/lib/grafana/dashboards }

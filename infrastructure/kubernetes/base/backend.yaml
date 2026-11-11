@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudops-backend
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudops-backend
+  labels: { app.kubernetes.io/name: cloudops-backend, app.kubernetes.io/part-of: cloudops-ai }
+spec:
+  # The control loop is a singleton (in-process simulation + verification scheduler).
+  # Scale-out requires leader election; see docs/architecture/DECISIONS.md (ADR-009).
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app.kubernetes.io/name: cloudops-backend } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: cloudops-backend, app.kubernetes.io/part-of: cloudops-ai }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "8000", prometheus.io/path: /metrics }
+    spec:
+      serviceAccountName: cloudops-backend
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: backend
+          image: ghcr.io/OWNER/cloudops-ai-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ name: http, containerPort: 8000 }]
+          envFrom:
+            - configMapRef: { name: cloudops-config }
+            - secretRef: { name: cloudops-secrets }
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 10, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 20, periodSeconds: 15 }
+          startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5, failureThreshold: 24 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudops-backend
+spec:
+  selector: { app.kubernetes.io/name: cloudops-backend }
+  ports: [{ name: http, port: 8000, targetPort: http }]

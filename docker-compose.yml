@@ -1,0 +1,136 @@
+# CloudOps AI — local stack.
+#   make up                         -> platform + observability (LocalCloudProvider simulation)
+#   docker compose --profile services up -d   -> also start the real demo microservices + load generator
+name: cloudops-ai
+
+x-security: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  read_only: true
+  tmpfs: ["/tmp"]
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cloudops_ai
+      POSTGRES_USER: cloudops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/bootstrap_env.sh first}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudops -d cloudops_ai"]
+      interval: 5s
+      retries: 10
+    ports: ["127.0.0.1:${PG_HOST_PORT:-5432}:5432"]
+    restart: unless-stopped
+
+  backend:
+    <<: *hardening
+    build: { context: ., dockerfile: backend/Dockerfile }
+    image: cloudops-ai/backend:local
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://cloudops:${POSTGRES_PASSWORD}@postgres:5432/cloudops_ai
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      CORS_ORIGINS: http://localhost:${UI_HOST_PORT:-3000}
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["127.0.0.1:${API_HOST_PORT:-8000}:8000"]
+    labels: { logging: "promtail" }
+
+  frontend:
+    <<: *hardening
+    tmpfs: ["/tmp", "/var/cache/nginx", "/etc/nginx/conf.d:uid=101,gid=101"]
+    build: { context: frontend }
+    image: cloudops-ai/frontend:local
+    depends_on: [backend]
+    ports: ["127.0.0.1:${UI_HOST_PORT:-3000}:8080"]
+
+  # ---------------------------------------------------------------- observability
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d", "--web.enable-lifecycle"]
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+      - promdata:/prometheus
+    ports: ["127.0.0.1:${PROM_HOST_PORT:-9090}:9090"]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?run scripts/bootstrap_env.sh first}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus, loki]
+    ports: ["127.0.0.1:${GRAFANA_HOST_PORT:-3001}:3000"]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.1.1
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes: ["./observability/loki:/etc/loki:ro", "lokidata:/loki"]
+    ports: ["127.0.0.1:${LOKI_HOST_PORT:-3100}:3100"]
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./observability/promtail:/etc/promtail:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    command: ["--config=/etc/otel/collector.yml"]
+    volumes: ["./observability/otel:/etc/otel:ro"]
+    ports: ["127.0.0.1:${OTLP_HOST_PORT:-4318}:4318"]
+    restart: unless-stopped
+
+  # ------------------------------------------------- real demo microservices
+  api-gateway: &demo
+    <<: *hardening
+    profiles: ["services"]
+    build: { context: services }
+    image: cloudops-ai/demo-service:local
+    environment:
+      SERVICE_NAME: api-gateway
+      DOWNSTREAM: http://user-service:8080,http://payment-service:8080
+      CHAOS_TOKEN: ${CHAOS_TOKEN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    ports: ["127.0.0.1:${GATEWAY_HOST_PORT:-8080}:8080"]
+    labels: { logging: "promtail" }
+    deploy: { resources: { limits: { cpus: "1.0", memory: 256M } } }
+  user-service:
+    <<: *demo
+    environment: { SERVICE_NAME: user-service, CHAOS_TOKEN: "${CHAOS_TOKEN:-}", OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318 }
+    ports: []
+  payment-service:
+    <<: *demo
+    environment: { SERVICE_NAME: payment-service, DOWNSTREAM: http://notification-service:8080, CHAOS_TOKEN: "${CHAOS_TOKEN:-}", OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318 }
+    ports: []
+  notification-service:
+    <<: *demo
+    environment: { SERVICE_NAME: notification-service, CHAOS_TOKEN: "${CHAOS_TOKEN:-}", OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318 }
+    ports: []
+  loadgen:
+    <<: *hardening
+    profiles: ["services"]
+    image: cloudops-ai/demo-service:local
+    command: ["python", "/app/loadgen.py"]
+    volumes: ["./services/loadgen.py:/app/loadgen.py:ro"]
+    environment: { TARGET: "http://api-gateway:8080/api/work", RPS: "10", MAX_IN_FLIGHT: "20" }
+    healthcheck: { disable: true }
+    depends_on: [api-gateway]
+
+volumes:
+  pgdata:
+  promdata:
+  lokidata:

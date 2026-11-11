@@ -1,0 +1,52 @@
+# Default deny, then allow only the flows the architecture needs (least privilege on the network).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns-egress }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: backend }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: cloudops-backend } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ port: 8000 }]  # from ingress controller, frontend and Prometheus
+  egress:
+    - ports: [{ port: 5432 }, { port: 443 }, { port: 4318 }]  # database, cloud/LLM APIs, OTLP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: frontend }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: cloudops-frontend } }
+  policyTypes: [Ingress, Egress]
+  ingress: [{ ports: [{ port: 8080 }] }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: cloudops-backend } } }]
+      ports: [{ port: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: demo-services }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/part-of: cloudops-demo } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/part-of: cloudops-demo } } }, { namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: observability } } }]
+      ports: [{ port: 8080 }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/part-of: cloudops-demo } } }]
+      ports: [{ port: 8080 }]
+    - ports: [{ port: 4318 }]

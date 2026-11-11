@@ -1,0 +1,18 @@
+# kind / minikube / Docker Desktop: images built locally (make images), no TLS.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cloudops
+resources: [../../base, postgres.yaml]
+images:
+  - { name: ghcr.io/OWNER/cloudops-ai-backend, newName: cloudops-ai/backend, newTag: local }
+  - { name: ghcr.io/OWNER/cloudops-ai-frontend, newName: cloudops-ai/frontend, newTag: local }
+  - { name: ghcr.io/OWNER/cloudops-ai-demo-service, newName: cloudops-ai/demo-service, newTag: local }
+patches:
+  - target: { kind: Ingress, name: cloudops }
+    patch: |-
+      - { op: replace, path: /spec/rules/0/host, value: cloudops.localhost }
+      - { op: remove, path: /spec/tls }
+  - target: { kind: ConfigMap, name: cloudops-config }
+    patch: |-
+      - { op: replace, path: /data/ENVIRONMENT, value: development }
+      - { op: replace, path: /data/CORS_ORIGINS, value: "http://cloudops.localhost" }

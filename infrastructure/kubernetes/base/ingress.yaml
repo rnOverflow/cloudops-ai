@@ -1,0 +1,16 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cloudops
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [cloudops.example.com], secretName: cloudops-tls }]
+  rules:
+    - host: cloudops.example.com
+      http:
+        paths:
+          - { path: /api, pathType: Prefix, backend: { service: { name: cloudops-backend, port: { number: 8000 } } } }
+          - { path: /, pathType: Prefix, backend: { service: { name: cloudops-frontend, port: { number: 80 } } } }

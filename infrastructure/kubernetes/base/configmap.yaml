@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudops-config
+data:
+  ENVIRONMENT: production
+  CLOUD_PROVIDER: local
+  TICK_SECONDS: "2"
+  VERIFY_AFTER_TICKS: "5"
+  LLM_PROVIDER: none
+  LOG_LEVEL: INFO
+  CORS_ORIGINS: https://cloudops.example.com
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318
+  RUNBOOKS_DIR: /app/runbooks

@@ -1,0 +1,227 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  labels: { app.kubernetes.io/name: api-gateway, app.kubernetes.io/part-of: cloudops-demo }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app.kubernetes.io/name: api-gateway } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: api-gateway, app.kubernetes.io/part-of: cloudops-demo }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: /metrics }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: app
+          image: ghcr.io/OWNER/cloudops-ai-demo-service:latest
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: SERVICE_NAME, value: api-gateway }
+            - { name: DOWNSTREAM, value: "http://user-service:8080,http://payment-service:8080" }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, valueFrom: { configMapKeyRef: { name: cloudops-config, key: OTEL_EXPORTER_OTLP_ENDPOINT } } }
+            - { name: CHAOS_TOKEN, valueFrom: { secretKeyRef: { name: cloudops-chaos, key: token, optional: true } } }
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 256Mi } }
+          readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 5, failureThreshold: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 10, periodSeconds: 10 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+spec:
+  selector: { app.kubernetes.io/name: api-gateway }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api-gateway }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } } }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: api-gateway } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  labels: { app.kubernetes.io/name: user-service, app.kubernetes.io/part-of: cloudops-demo }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app.kubernetes.io/name: user-service } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: user-service, app.kubernetes.io/part-of: cloudops-demo }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: /metrics }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: app
+          image: ghcr.io/OWNER/cloudops-ai-demo-service:latest
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: SERVICE_NAME, value: user-service }
+            - { name: DOWNSTREAM, value: "" }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, valueFrom: { configMapKeyRef: { name: cloudops-config, key: OTEL_EXPORTER_OTLP_ENDPOINT } } }
+            - { name: CHAOS_TOKEN, valueFrom: { secretKeyRef: { name: cloudops-chaos, key: token, optional: true } } }
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 256Mi } }
+          readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 5, failureThreshold: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 10, periodSeconds: 10 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+spec:
+  selector: { app.kubernetes.io/name: user-service }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: user-service
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: user-service }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } } }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: user-service
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: user-service } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  labels: { app.kubernetes.io/name: payment-service, app.kubernetes.io/part-of: cloudops-demo }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app.kubernetes.io/name: payment-service } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: payment-service, app.kubernetes.io/part-of: cloudops-demo }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: /metrics }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: app
+          image: ghcr.io/OWNER/cloudops-ai-demo-service:latest
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: SERVICE_NAME, value: payment-service }
+            - { name: DOWNSTREAM, value: "http://notification-service:8080" }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, valueFrom: { configMapKeyRef: { name: cloudops-config, key: OTEL_EXPORTER_OTLP_ENDPOINT } } }
+            - { name: CHAOS_TOKEN, valueFrom: { secretKeyRef: { name: cloudops-chaos, key: token, optional: true } } }
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 256Mi } }
+          readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 5, failureThreshold: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 10, periodSeconds: 10 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+spec:
+  selector: { app.kubernetes.io/name: payment-service }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment-service
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: payment-service }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } } }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payment-service
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: payment-service } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  labels: { app.kubernetes.io/name: notification-service, app.kubernetes.io/part-of: cloudops-demo }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app.kubernetes.io/name: notification-service } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: notification-service, app.kubernetes.io/part-of: cloudops-demo }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: /metrics }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: app
+          image: ghcr.io/OWNER/cloudops-ai-demo-service:latest
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: SERVICE_NAME, value: notification-service }
+            - { name: DOWNSTREAM, value: "" }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, valueFrom: { configMapKeyRef: { name: cloudops-config, key: OTEL_EXPORTER_OTLP_ENDPOINT } } }
+            - { name: CHAOS_TOKEN, valueFrom: { secretKeyRef: { name: cloudops-chaos, key: token, optional: true } } }
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 256Mi } }
+          readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 5, failureThreshold: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 10, periodSeconds: 10 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+spec:
+  selector: { app.kubernetes.io/name: notification-service }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: notification-service
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: notification-service }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } } }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: notification-service
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: notification-service } }

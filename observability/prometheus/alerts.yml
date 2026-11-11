@@ -1,0 +1,42 @@
+# Prometheus-native mirrors of the CloudOps detection rules, so paging still works if the
+# control plane itself is down (defence in depth). Thresholds match app/detection/engine.py.
+groups:
+  - name: cloudops-services
+    rules:
+      - alert: HighCPU
+        expr: cloudops_service_cpu_percent > 85
+        for: 30s
+        labels: { severity: medium }
+        annotations: { summary: "High CPU on {{ $labels.service }} ({{ $value | humanize }}%)", runbook: "high-cpu" }
+      - alert: HighErrorRate
+        expr: cloudops_service_error_rate > 0.05
+        for: 20s
+        labels: { severity: high }
+        annotations: { summary: "Error rate {{ $value | humanizePercentage }} on {{ $labels.service }}", runbook: "high-error-rate" }
+      - alert: HighLatencyP95
+        expr: cloudops_service_latency_p95_ms > 500
+        for: 30s
+        labels: { severity: medium }
+        annotations: { summary: "p95 {{ $value | humanize }}ms on {{ $labels.service }}", runbook: "api-latency" }
+      - alert: ServiceUnavailable
+        expr: cloudops_service_healthy_pods == 0 and cloudops_service_replicas > 0
+        for: 20s
+        labels: { severity: critical }
+        annotations: { summary: "No ready pods for {{ $labels.service }}", runbook: "service-outage" }
+      - alert: DemoServiceErrorBudgetFastBurn
+        expr: |
+          (sum by (service) (rate(http_requests_total{status=~"5.."}[5m])) / sum by (service) (rate(http_requests_total[5m]))) > (14.4 * 0.001)
+        for: 2m
+        labels: { severity: high }
+        annotations: { summary: "{{ $labels.service }} burning error budget 14.4x" }
+  - name: cloudops-control-plane
+    rules:
+      - alert: ControlLoopStalled
+        expr: rate(cloudops_control_loop_seconds_count[2m]) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "CloudOps control loop is not ticking" }
+      - alert: RemediationFailures
+        expr: increase(cloudops_remediations_total{result=~"failed|execution_failed"}[15m]) > 2
+        labels: { severity: high }
+        annotations: { summary: "Repeated remediation verification failures" }

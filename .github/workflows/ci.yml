@@ -1,0 +1,180 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-packages --python ${{ env.PYTHON_VERSION }}
+      - run: uv run ruff check backend/app ai-agent tests
+      - run: uv run ruff format --check backend/app ai-agent tests
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci --prefix frontend
+      - run: npx --prefix frontend tsc -b frontend
+
+  unit-tests:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-packages --python ${{ env.PYTHON_VERSION }}
+      - run: PYTHONPATH=backend uv run pytest tests/unit --cov=backend/app --cov=ai-agent/cloudops_agent --cov-report=term-missing
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci --prefix frontend && npm --prefix frontend exec vitest run
+
+  integration-tests:
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_DB: cloudops_test, POSTGRES_USER: ci, POSTGRES_PASSWORD: ci-only-password }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://ci:ci-only-password@localhost:5432/cloudops_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-packages --python ${{ env.PYTHON_VERSION }}
+      - name: Migrations apply cleanly
+        run: cd backend && DATABASE_URL=$TEST_DATABASE_URL JWT_SECRET=$(python -c "print('x'*40)") uv run alembic upgrade head
+      - name: Integration + end-to-end incident recovery (PostgreSQL)
+        run: PYTHONPATH=backend uv run pytest tests/integration tests/e2e
+
+  security-scan:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-packages --python ${{ env.PYTHON_VERSION }}
+      - name: SAST (bandit)
+        run: uv run bandit -r backend/app ai-agent/cloudops_agent services/demo_service -ll
+      - name: Python dependency audit
+        run: uv export --no-hashes --all-packages > /tmp/req.txt && uv run pip-audit -r /tmp/req.txt --strict || true
+      - name: npm audit (high+)
+        run: npm ci --prefix frontend && npm audit --prefix frontend --audit-level=high
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: IaC scan (Terraform + Kubernetes)
+        uses: aquasecurity/trivy-action@0.24.0
+        with: { scan-type: config, scan-ref: infrastructure, severity: "CRITICAL,HIGH", exit-code: "0" }
+
+  docker-build:
+    needs: [unit-tests, integration-tests, security-scan]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { name: backend, context: ., file: backend/Dockerfile }
+          - { name: frontend, context: frontend, file: frontend/Dockerfile }
+          - { name: demo-service, context: services, file: services/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          tags: cloudops-ai/${{ matrix.name }}:${{ github.sha }}
+          load: true
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Container scan (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: cloudops-ai/${{ matrix.name }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Save image
+        run: docker save cloudops-ai/${{ matrix.name }}:${{ github.sha }} | gzip > /tmp/${{ matrix.name }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with: { name: "image-${{ matrix.name }}", path: "/tmp/${{ matrix.name }}.tar.gz", retention-days: 3 }
+
+  terraform-validate:
+    needs: lint
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: infrastructure/terraform/aws } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+      - name: Kubernetes manifests render
+        working-directory: infrastructure/kubernetes
+        run: kubectl kustomize overlays/local > /dev/null && kubectl kustomize overlays/aws > /dev/null
+
+  build:
+    needs: [docker-build, terraform-validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci --prefix frontend && npm run --prefix frontend build
+      - uses: actions/upload-artifact@v4
+        with: { name: frontend-dist, path: frontend/dist, retention-days: 7 }
+
+  # Deploy only on version tags, only when AWS is configured (OIDC role; no long-lived keys).
+  deploy:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    environment: production
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with: { role-to-assume: "${{ vars.AWS_DEPLOY_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION || 'us-east-1' }}" }
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: actions/download-artifact@v4
+        with: { pattern: "image-*", merge-multiple: true, path: /tmp/images }
+      - name: Push images
+        run: |
+          for n in backend frontend demo-service; do
+            gunzip -c /tmp/images/$n.tar.gz | docker load
+            docker tag cloudops-ai/$n:${{ github.sha }} ${{ steps.ecr.outputs.registry }}/cloudops/$n:${{ github.ref_name }}
+            docker push ${{ steps.ecr.outputs.registry }}/cloudops/$n:${{ github.ref_name }}
+          done
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform apply
+        working-directory: infrastructure/terraform/aws
+        run: terraform init && terraform apply -auto-approve -var image_tag=${{ github.ref_name }}
+
+  smoke-tests:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Smoke test deployed stack
+        run: ./scripts/smoke_test.sh "${{ vars.CLOUDOPS_URL }}"

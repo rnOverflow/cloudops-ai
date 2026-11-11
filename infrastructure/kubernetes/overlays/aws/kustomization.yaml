@@ -1,0 +1,13 @@
+# EKS variant (optional; the Terraform default is ECS Fargate, which is cheaper for this footprint).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../../base]
+patches:
+  - target: { kind: ConfigMap, name: cloudops-config }
+    patch: |-
+      - { op: replace, path: /data/CLOUD_PROVIDER, value: aws }
+  - target: { kind: ServiceAccount, name: cloudops-backend }
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value: { eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/cloudops-backend" }
